@@ -24,6 +24,8 @@
 
 </div>
 
+> **This is a fork of [666ghj/MiroFish](https://github.com/666ghj/MiroFish).** The content below is the original README plus the fork's additions: an optional [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) decision step for agents and stability fixes for long simulations and the Zep Cloud free plan. See [What this fork adds](#-what-this-fork-adds).
+
 ## ⚡ Overview
 
 **MiroFish** is a next-generation AI prediction engine powered by multi-agent technology. By extracting seed information from the real world (such as breaking news, policy drafts, or financial signals), it automatically constructs a high-fidelity parallel digital world. Within this space, thousands of intelligent agents with independent personalities, long-term memory, and behavioral logic freely interact and undergo social evolution. You can inject variables dynamically from a "God's-eye view" to precisely deduce future trajectories — **rehearse the future in a digital sandbox, and win decisions after countless simulations**.
@@ -91,6 +93,27 @@ Click the image to watch MiroFish's deep prediction of the lost ending based on 
 4. **Report Generation**: ReportAgent with rich toolset for deep interaction with post-simulation environment
 5. **Deep Interaction**: Chat with any agent in the simulated world & Interact with ReportAgent
 
+## 🍴 What this fork adds
+
+### Jev decision step for agents (optional)
+
+In each round, every active agent normally calls the LLM to pick its action. With `JEV_ENABLED=true`, [Jev](https://openrouter.ai/~typesafe/jev-latest) (TypeSafe's System One model, reached through OpenRouter) makes that decision first. It sees the agent's persona and feed, and returns the action and its target (post, comment or user) with calibrated probabilities.
+
+- **No text needed** (like, dislike, repost, follow, mute, like comment, do nothing): the action runs directly, with no LLM call.
+- **Text needed** (create post, comment, quote, search): the LLM is called and told which action Jev chose.
+- **Jev error**: that agent falls back to the plain LLM step, so the simulation continues.
+
+By default the action is sampled from Jev's probability distribution rather than taking the top choice, which keeps the population from collapsing into one behavior. Actions still go to the same OASIS database, so logs, reports and the UI work unchanged. The code is in `backend/scripts/jev_decider.py`.
+
+In a 72-round dual-platform run with 47 agents, Jev handled 81% of Twitter decisions and 44% of Reddit decisions without an LLM call, for about US$ 1.17 in Jev usage.
+
+### Stability fixes
+
+- **Simulations now finish.** After the last round, the simulation script stays alive so agents can be interviewed. The runner only marked a run as completed when that process exited, so step 3 never unlocked the report. A run is now completed once every platform ends, and the interview environment stays available.
+- **Reopening step 3 no longer wipes a run.** The page used to force-restart the simulation on every mount, which deleted the previous run's databases and logs. It now resumes an existing run and only starts a simulation that never ran or failed.
+- **Slow Zep ingestion no longer loses the graph.** The ingestion wait is configurable with `ZEP_INGESTION_WAIT_TIMEOUT_SECONDS`, default 600s. Retrying a build that timed out reuses the Zep batch when it is still processing or has already succeeded, instead of deleting the graph.
+- **Better behavior under Zep's FREE-plan rate limit** (300 requests/minute). HTTP 429 responses get up to 6 attempts and honor `Retry-After`. The graph data the UI polls is cached for 60s, so the UI cannot exhaust the quota while a report is being generated.
+
 ## 🚀 Quick Start
 
 ### Option 1: Source Code Deployment (Recommended)
@@ -125,6 +148,26 @@ LLM_MODEL_NAME=qwen-plus
 # Zep Cloud Configuration
 # Free monthly quota is sufficient for simple usage: https://app.getzep.com/
 ZEP_API_KEY=your_zep_api_key
+```
+
+**Optional Environment Variables (fork):**
+
+```env
+# Any OpenAI-compatible provider works for the LLM, for example:
+#   Ollama Cloud: LLM_BASE_URL=https://ollama.com/v1        LLM_MODEL_NAME=deepseek-v4.1-flash
+#   OpenRouter:   LLM_BASE_URL=https://openrouter.ai/api/v1 LLM_MODEL_NAME=qwen/qwen3.8-flash
+
+# Jev decision step for agents (off by default)
+JEV_ENABLED=true
+TYPESAFE_API_KEY=your_openrouter_api_key   # an OpenRouter key; no separate TypeSafe account needed
+TYPESAFE_BASE_URL=https://openrouter.ai/api
+# JEV_MODEL=jev-1.13          # model name (default jev-1.13)
+# JEV_SAMPLING=sample         # sample (default) or argmax
+# JEV_CONCURRENCY=50          # parallel Jev requests
+# JEV_SEED=42                 # set for reproducible sampling
+
+# Max seconds to wait for Zep to process an uploaded graph (default 600)
+ZEP_INGESTION_WAIT_TIMEOUT_SECONDS=3600
 ```
 
 #### 2. Install Dependencies
