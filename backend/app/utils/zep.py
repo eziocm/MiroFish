@@ -25,7 +25,7 @@ ZEP_CLOUD_BASE_URL = "https://api.getzep.com/api/v2"
 ZEP_HTTP_REQUEST_TIMEOUT_SECONDS = 60.0
 # Zep ingestion is asynchronous and may take several minutes. Preserve the
 # original GraphBuilder deadline while keeping it separate from HTTP timeout.
-ZEP_INGESTION_WAIT_TIMEOUT_SECONDS = 600
+ZEP_INGESTION_WAIT_TIMEOUT_SECONDS = int(os.environ.get("ZEP_INGESTION_WAIT_TIMEOUT_SECONDS", "600"))
 MAX_ZEP_SEARCH_QUERY_CHARS = 400
 MAX_ZEP_SEARCH_RESULTS = 50
 
@@ -128,20 +128,29 @@ def call_zep_read_with_retry(
     *,
     operation_name: str,
     max_attempts: int = 3,
+    max_rate_limit_attempts: int = 6,
     initial_delay: float = 2.0,
     max_delay: float = 60.0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> T:
-    """Retry a safe Zep read only for transport, 408, 429, or 5xx errors."""
+    """Retry a safe Zep read only for transport, 408, 429, or 5xx errors.
+
+    A 429 is Zep asking to wait for the next rate-limit window (the FREE plan
+    allows 300 requests/minute), so it gets more patience than other errors.
+    """
 
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
 
-    for attempt in range(1, max_attempts + 1):
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             return operation()
         except Exception as error:
-            if attempt == max_attempts or not is_retryable_zep_error(error):
+            rate_limited = getattr(error, "status_code", None) == 429
+            limit = max(max_attempts, max_rate_limit_attempts) if rate_limited else max_attempts
+            if attempt >= limit or not is_retryable_zep_error(error):
                 raise
 
             retry_after = _retry_after_seconds(error)
@@ -153,10 +162,8 @@ def call_zep_read_with_retry(
                 "Zep %s attempt %s/%s failed (%s); retrying in %.1fs",
                 operation_name,
                 attempt,
-                max_attempts,
+                limit,
                 type(error).__name__,
                 delay,
             )
             sleep(delay)
-
-    raise AssertionError("unreachable")

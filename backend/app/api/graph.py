@@ -7,6 +7,7 @@ import os
 import re
 import traceback
 import threading
+import time
 from contextlib import ExitStack, nullcontext
 from flask import request, jsonify
 from zep_cloud import NotFoundError
@@ -78,6 +79,7 @@ def _delete_cloud_graph_if_present(graph_id: str | None) -> None:
 
     if not graph_id:
         return
+    _graph_data_cache.pop(graph_id, None)
     # Keep the consumer check and Cloud mutation in one critical section. The
     # callers that also clear local references hold this re-entrant lock around
     # both operations.
@@ -92,6 +94,14 @@ def _delete_cloud_graph_if_present(graph_id: str | None) -> None:
             GraphBuilderService(api_key=Config.ZEP_API_KEY).delete_graph(graph_id)
         except NotFoundError:
             logger.info("Zep Cloud graph already absent: %s", graph_id)
+
+
+def _persisted_batch_is_resumable(project) -> bool:
+    if not (project.graph_id and project.zep_batch_id and project.zep_batch_operation_id):
+        return False
+    builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
+    batch_summary = builder.get_batch_summary(project.zep_batch_id)
+    return getattr(batch_summary, "status", None) in {"queued", "processing", "succeeded"}
 
 
 def _clear_project_graph_reference(project) -> None:
@@ -527,7 +537,14 @@ def _build_graph_impl():
             }), 400
         
         resume_existing_batch = False
-        if project.status == ProjectStatus.GRAPH_BUILDING:
+        if project.status == ProjectStatus.FAILED and not force:
+            # A build that timed out waiting for Zep may have finished since;
+            # reuse the persisted batch instead of deleting the graph.
+            try:
+                resume_existing_batch = _persisted_batch_is_resumable(project)
+            except Exception as exc:
+                logger.warning(f"Persisted Zep batch not resumable, rebuilding: {exc}")
+        elif project.status == ProjectStatus.GRAPH_BUILDING:
             if _project_has_active_build(project):
                 return jsonify({
                     "success": True,
@@ -540,20 +557,8 @@ def _build_graph_impl():
                     }
                 })
 
-            if (
-                not force
-                and project.graph_id
-                and project.zep_batch_id
-                and project.zep_batch_operation_id
-            ):
-                builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
-                batch_summary = builder.get_batch_summary(project.zep_batch_id)
-                if getattr(batch_summary, "status", None) in {
-                    "queued",
-                    "processing",
-                    "succeeded",
-                }:
-                    resume_existing_batch = True
+            if not force and _persisted_batch_is_resumable(project):
+                resume_existing_batch = True
 
             if not resume_existing_batch:
                 project.status = ProjectStatus.FAILED
@@ -619,8 +624,9 @@ def _build_graph_impl():
             }), 400
 
         # Only mutate Cloud state after the complete rebuild request validates.
-        if project.status == ProjectStatus.FAILED or (
-            force and project.status == ProjectStatus.GRAPH_COMPLETED
+        if not resume_existing_batch and (
+            project.status == ProjectStatus.FAILED
+            or (force and project.status == ProjectStatus.GRAPH_COMPLETED)
         ):
             graph_id_to_delete = project.graph_id
             graph_guard = (
@@ -876,6 +882,24 @@ def list_tasks():
 
 # ============== 图谱数据接口 ==============
 
+# The UI re-fetches the whole graph (~100 Zep requests for a large graph) on a
+# timer; share one fetch per graph per window so it cannot exhaust Zep's
+# per-minute quota while a report is being generated.
+GRAPH_DATA_CACHE_SECONDS = 60
+_graph_data_cache: dict = {}
+_graph_data_cache_lock = threading.Lock()
+
+
+def _cached_graph_data(graph_id: str):
+    with _graph_data_cache_lock:
+        cached = _graph_data_cache.get(graph_id)
+        if cached and time.monotonic() - cached[0] < GRAPH_DATA_CACHE_SECONDS:
+            return cached[1]
+        graph_data = GraphBuilderService(api_key=Config.ZEP_API_KEY).get_graph_data(graph_id)
+        _graph_data_cache[graph_id] = (time.monotonic(), graph_data)
+        return graph_data
+
+
 @graph_bp.route('/data/<graph_id>', methods=['GET'])
 def get_graph_data(graph_id: str):
     """
@@ -888,8 +912,7 @@ def get_graph_data(graph_id: str):
                 "error": t('api.zepApiKeyMissing')
             }), 500
         
-        builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
-        graph_data = builder.get_graph_data(graph_id)
+        graph_data = _cached_graph_data(graph_id)
         
         return jsonify({
             "success": True,

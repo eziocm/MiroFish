@@ -244,6 +244,81 @@ def test_stale_build_resumes_a_persisted_processing_batch(monkeypatch):
     assert len(created_threads) == 1
 
 
+def _build_after_failure(monkeypatch, batch_status):
+    project = _project(ProjectStatus.FAILED)
+    events = []
+
+    class Tasks:
+        def create_task(self, _description):
+            return "task-retry"
+
+    class Builder:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_batch_summary(self, batch_id):
+            assert batch_id == "batch-1"
+            return SimpleNamespace(status=batch_status)
+
+        def delete_graph(self, graph_id):
+            events.append(("cloud-delete", graph_id))
+
+    class Thread:
+        def __init__(self, *, target, daemon):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(graph_api.Config, "ZEP_API_KEY", "test-key")
+    monkeypatch.setattr(graph_api, "TaskManager", Tasks)
+    monkeypatch.setattr(graph_api, "GraphBuilderService", Builder)
+    monkeypatch.setattr(graph_api.threading, "Thread", Thread)
+    monkeypatch.setattr(
+        graph_api.ProjectManager,
+        "get_project",
+        classmethod(lambda _cls, _project_id: project),
+    )
+    monkeypatch.setattr(
+        graph_api.ProjectManager,
+        "get_extracted_text",
+        classmethod(lambda _cls, _project_id: "source text"),
+    )
+    monkeypatch.setattr(
+        graph_api.ProjectManager,
+        "save_project",
+        classmethod(lambda _cls, _project: None),
+    )
+
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/api/graph/build",
+        method="POST",
+        json={"project_id": "proj-1"},
+    ):
+        body, status = _json_result(graph_api.build_graph())
+    return project, body, status, events
+
+
+def test_failed_build_resumes_a_batch_that_finished_after_timeout(monkeypatch):
+    project, body, status, events = _build_after_failure(monkeypatch, "succeeded")
+
+    assert status == 200
+    assert body["data"]["resumed"] is True
+    assert events == []
+    assert project.graph_id == "graph-1"
+    assert project.zep_batch_id == "batch-1"
+
+
+def test_failed_build_with_failed_batch_rebuilds_from_scratch(monkeypatch):
+    project, body, status, events = _build_after_failure(monkeypatch, "failed")
+
+    assert status == 200
+    assert body["data"]["resumed"] is False
+    assert events == [("cloud-delete", "graph-1")]
+    assert project.zep_batch_id is None
+
+
 def test_project_delete_removes_cloud_graph_before_local_files(monkeypatch):
     project = _project(ProjectStatus.GRAPH_COMPLETED)
     events = []
@@ -416,3 +491,36 @@ def test_graph_reset_and_memory_start_cannot_cross_between_delete_and_clear(
     assert results["start"][1] == 409
     assert runner_called == []
     assert project.graph_id is None
+
+
+def test_graph_data_endpoint_shares_one_zep_fetch_per_window(monkeypatch):
+    fetches = []
+
+    class Builder:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_graph_data(self, graph_id):
+            fetches.append(graph_id)
+            return {"graph_id": graph_id, "nodes": [], "edges": []}
+
+    clock = [1000.0]
+    monkeypatch.setattr(graph_api, "GraphBuilderService", Builder)
+    monkeypatch.setattr(graph_api.Config, "ZEP_API_KEY", "test-key")
+    monkeypatch.setattr(graph_api.time, "monotonic", lambda: clock[0])
+    graph_api._graph_data_cache.clear()
+
+    app = Flask(__name__)
+    try:
+        for _ in range(3):
+            with app.test_request_context("/api/graph/data/graph-1"):
+                body, status = _json_result(graph_api.get_graph_data("graph-1"))
+            assert status == 200 and body["data"]["graph_id"] == "graph-1"
+        assert fetches == ["graph-1"]
+
+        clock[0] += graph_api.GRAPH_DATA_CACHE_SECONDS + 1
+        with app.test_request_context("/api/graph/data/graph-1"):
+            graph_api.get_graph_data("graph-1")
+        assert fetches == ["graph-1", "graph-1"]
+    finally:
+        graph_api._graph_data_cache.clear()
