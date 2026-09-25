@@ -173,6 +173,8 @@ except ImportError as e:
     print("请先安装: pip install oasis-ai camel-ai")
     sys.exit(1)
 
+from jev_decider import JevDecider
+
 
 # Twitter可用动作（不包含INTERVIEW，INTERVIEW只能通过ManualAction手动触发）
 TWITTER_ACTIONS = [
@@ -1224,6 +1226,7 @@ async def run_twitter_simulation(
             log_info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
     
     start_time = datetime.now()
+    jev_decider = JevDecider.from_env()
     
     for round_num in range(total_rounds):
         # 检查是否收到退出信号
@@ -1250,8 +1253,11 @@ async def run_twitter_simulation(
                 action_logger.log_round_end(round_num + 1, 0)
             continue
         
-        actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
+        if jev_decider:
+            await jev_decider.step(result.env, [agent for _, agent in active_agents])
+        else:
+            actions = {agent: LLMAction() for _, agent in active_agents}
+            await result.env.step(actions)
         
         # 从数据库获取实际执行的动作并记录
         actual_actions, last_rowid = fetch_new_actions_from_db(
@@ -1277,6 +1283,10 @@ async def run_twitter_simulation(
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
+    
+    if jev_decider:
+        log_info(jev_decider.summary())
+        await jev_decider.aclose()
     
     # 注意：不关闭环境，保留给Interview使用
     
@@ -1423,6 +1433,7 @@ async def run_reddit_simulation(
             log_info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
     
     start_time = datetime.now()
+    jev_decider = JevDecider.from_env()
     
     for round_num in range(total_rounds):
         # 检查是否收到退出信号
@@ -1449,8 +1460,11 @@ async def run_reddit_simulation(
                 action_logger.log_round_end(round_num + 1, 0)
             continue
         
-        actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
+        if jev_decider:
+            await jev_decider.step(result.env, [agent for _, agent in active_agents])
+        else:
+            actions = {agent: LLMAction() for _, agent in active_agents}
+            await result.env.step(actions)
         
         # 从数据库获取实际执行的动作并记录
         actual_actions, last_rowid = fetch_new_actions_from_db(
@@ -1476,6 +1490,10 @@ async def run_reddit_simulation(
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
+    
+    if jev_decider:
+        log_info(jev_decider.summary())
+        await jev_decider.aclose()
     
     # 注意：不关闭环境，保留给Interview使用
     

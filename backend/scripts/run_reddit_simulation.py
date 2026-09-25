@@ -130,6 +130,8 @@ except ImportError as e:
     print("请先安装: pip install oasis-ai camel-ai")
     sys.exit(1)
 
+from jev_decider import JevDecider
+
 
 # IPC相关常量
 IPC_COMMANDS_DIR = "ipc_commands"
@@ -622,6 +624,7 @@ class RedditSimulationRunner:
         # 主模拟循环
         print("\n开始模拟循环...")
         start_time = datetime.now()
+        jev_decider = JevDecider.from_env()
         
         for round_num in range(total_rounds):
             simulated_minutes = round_num * minutes_per_round
@@ -635,12 +638,14 @@ class RedditSimulationRunner:
             if not active_agents:
                 continue
             
-            actions = {
-                agent: LLMAction()
-                for _, agent in active_agents
-            }
-            
-            await self.env.step(actions)
+            if jev_decider:
+                await jev_decider.step(self.env, [agent for _, agent in active_agents])
+            else:
+                actions = {
+                    agent: LLMAction()
+                    for _, agent in active_agents
+                }
+                await self.env.step(actions)
             
             if (round_num + 1) % 10 == 0 or round_num == 0:
                 elapsed = (datetime.now() - start_time).total_seconds()
@@ -652,6 +657,9 @@ class RedditSimulationRunner:
         
         total_elapsed = (datetime.now() - start_time).total_seconds()
         print(f"\n模拟循环完成!")
+        if jev_decider:
+            print(f"  - {jev_decider.summary()}")
+            await jev_decider.aclose()
         print(f"  - 总耗时: {total_elapsed:.1f}秒")
         print(f"  - 数据库: {db_path}")
         

@@ -130,6 +130,8 @@ except ImportError as e:
     print("请先安装: pip install oasis-ai camel-ai")
     sys.exit(1)
 
+from jev_decider import JevDecider
+
 
 # IPC相关常量
 IPC_COMMANDS_DIR = "ipc_commands"
@@ -629,6 +631,7 @@ class TwitterSimulationRunner:
         # 主模拟循环
         print("\n开始模拟循环...")
         start_time = datetime.now()
+        jev_decider = JevDecider.from_env()
         
         for round_num in range(total_rounds):
             # 计算当前模拟时间
@@ -644,14 +647,14 @@ class TwitterSimulationRunner:
             if not active_agents:
                 continue
             
-            # 构建动作
-            actions = {
-                agent: LLMAction()
-                for _, agent in active_agents
-            }
-            
-            # 执行动作
-            await self.env.step(actions)
+            if jev_decider:
+                await jev_decider.step(self.env, [agent for _, agent in active_agents])
+            else:
+                actions = {
+                    agent: LLMAction()
+                    for _, agent in active_agents
+                }
+                await self.env.step(actions)
             
             # 打印进度
             if (round_num + 1) % 10 == 0 or round_num == 0:
@@ -664,6 +667,9 @@ class TwitterSimulationRunner:
         
         total_elapsed = (datetime.now() - start_time).total_seconds()
         print(f"\n模拟循环完成!")
+        if jev_decider:
+            print(f"  - {jev_decider.summary()}")
+            await jev_decider.aclose()
         print(f"  - 总耗时: {total_elapsed:.1f}秒")
         print(f"  - 数据库: {db_path}")
         
