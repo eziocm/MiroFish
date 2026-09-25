@@ -227,6 +227,8 @@ class SimulationRunner:
     # 内存中的运行状态
     _run_states: Dict[str, SimulationRunState] = {}
     _processes: Dict[str, subprocess.Popen] = {}
+    # Finished runs whose script stays alive in command-wait mode (interviews)
+    _idle_envs: Dict[str, subprocess.Popen] = {}
     _action_queues: Dict[str, Queue] = {}
     _monitor_threads: Dict[str, threading.Thread] = {}
     _stdout_files: Dict[str, Any] = {}  # 存储 stdout 文件句柄
@@ -389,6 +391,8 @@ class SimulationRunner:
         Returns:
             SimulationRunState
         """
+        cls._close_idle_env(simulation_id)
+
         # 加载模拟配置
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         config_path = os.path.join(sim_dir, "simulation_config.json")
@@ -653,15 +657,22 @@ class SimulationRunner:
                 
                 # 更新状态
                 cls._save_run_state(state)
+                if cls._check_all_platforms_completed(state):
+                    # The script stays alive in command-wait mode for
+                    # interviews; the run itself is over.
+                    break
                 time.sleep(2)
             
-            # 进程结束后，最后读取一次日志
-            if os.path.exists(twitter_actions_log):
-                cls._read_action_log(twitter_actions_log, twitter_position, state, "twitter")
-            if os.path.exists(reddit_actions_log):
-                cls._read_action_log(reddit_actions_log, reddit_position, state, "reddit")
-            
-            exit_code = process.returncode
+            if process.poll() is None:
+                exit_code = 0
+            else:
+                # 进程结束后，最后读取一次日志
+                if os.path.exists(twitter_actions_log):
+                    cls._read_action_log(twitter_actions_log, twitter_position, state, "twitter")
+                if os.path.exists(reddit_actions_log):
+                    cls._read_action_log(reddit_actions_log, reddit_position, state, "reddit")
+                
+                exit_code = process.returncode
             
         except Exception as e:
             logger.error(f"监控线程异常: {simulation_id}, error={str(e)}")
@@ -745,7 +756,9 @@ class SimulationRunner:
                 cls._manual_stop_requests.discard(simulation_id)
             
             # 清理进程资源
-            cls._processes.pop(simulation_id, None)
+            finished_process = cls._processes.pop(simulation_id, None)
+            if finished_process is not None and finished_process.poll() is None:
+                cls._idle_envs[simulation_id] = finished_process
             cls._action_queues.pop(simulation_id, None)
             cls._monitor_threads.pop(simulation_id, None)
             
@@ -1386,6 +1399,7 @@ class SimulationRunner:
         """
         import shutil
         
+        cls._close_idle_env(simulation_id)
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         
         if not os.path.exists(sim_dir):
@@ -1446,6 +1460,18 @@ class SimulationRunner:
     _cleanup_done = False
     
     @classmethod
+    def _close_idle_env(cls, simulation_id: str) -> None:
+        """Terminate a finished run's interview environment, if still alive."""
+        process = cls._idle_envs.pop(simulation_id, None)
+        if process is not None and process.poll() is None:
+            try:
+                cls._terminate_process(process, simulation_id, timeout=5)
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                logger.error(f"关闭Interview环境失败: {simulation_id}, error={e}")
+
+    @classmethod
     def cleanup_all_simulations(cls):
         """
         清理所有运行中的模拟进程
@@ -1456,6 +1482,9 @@ class SimulationRunner:
         if cls._cleanup_done:
             return
         cls._cleanup_done = True
+
+        for idle_id in list(cls._idle_envs):
+            cls._close_idle_env(idle_id)
 
         updater_ids = set(ZepGraphMemoryManager.get_simulation_ids())
         simulation_ids = sorted(

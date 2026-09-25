@@ -482,3 +482,75 @@ def test_shutdown_drain_failure_remains_failed_and_retryable(monkeypatch):
         SimulationRunner._cleanup_done = False
         SimulationRunner._graph_memory_enabled.pop(simulation_id, None)
         SimulationRunner._manual_stop_requests.discard(simulation_id)
+
+
+def test_monitor_completes_run_while_script_waits_for_interview_commands(
+    monkeypatch, tmp_path
+):
+    simulation_id = "sim-command-wait"
+    for platform in ("twitter", "reddit"):
+        platform_dir = tmp_path / simulation_id / platform
+        platform_dir.mkdir(parents=True)
+        (platform_dir / "actions.jsonl").write_text(
+            '{"event_type":"simulation_end","total_rounds":1,"total_actions":0}\n',
+            encoding="utf-8",
+        )
+    state = SimulationRunState(
+        simulation_id=simulation_id,
+        runner_status=RunnerStatus.RUNNING,
+    )
+    synced = []
+    terminated = []
+
+    class Process:
+        pid = 123
+        stopped = False
+
+        def poll(self):
+            return 0 if self.stopped else None
+
+    process = Process()
+    monkeypatch.setattr(SimulationRunner, "RUN_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        SimulationRunner,
+        "get_run_state",
+        classmethod(lambda _cls, _simulation_id: state),
+    )
+    monkeypatch.setattr(
+        SimulationRunner,
+        "_save_run_state",
+        classmethod(lambda _cls, _state: None),
+    )
+    monkeypatch.setattr(
+        SimulationRunner,
+        "_sync_simulation_status",
+        classmethod(lambda _cls, _sim_id, status, *_args: synced.append(status)),
+    )
+    monkeypatch.setattr(
+        SimulationRunner,
+        "_terminate_process",
+        classmethod(
+            lambda _cls, proc, _simulation_id, **_kwargs: (
+                terminated.append(_simulation_id),
+                setattr(proc, "stopped", True),
+            )
+        ),
+    )
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _seconds: None)
+
+    SimulationRunner._processes[simulation_id] = process
+    try:
+        SimulationRunner._monitor_simulation(simulation_id)
+
+        assert state.runner_status == RunnerStatus.COMPLETED
+        assert state.completed_at is not None
+        assert synced == [RunnerStatus.COMPLETED]
+        assert process.poll() is None  # environment kept for interviews
+        assert SimulationRunner._idle_envs[simulation_id] is process
+
+        SimulationRunner._close_idle_env(simulation_id)
+        assert terminated == [simulation_id]
+        assert simulation_id not in SimulationRunner._idle_envs
+    finally:
+        SimulationRunner._processes.pop(simulation_id, None)
+        SimulationRunner._idle_envs.pop(simulation_id, None)

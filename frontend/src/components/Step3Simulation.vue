@@ -688,10 +688,34 @@ watch(() => props.systemLogs?.length, () => {
   })
 })
 
+// 重新打开页面时不能清空已有的模拟：已存在的运行只恢复监控，
+// 只有从未运行或失败的模拟才重新启动
+const RESUMABLE_STATUSES = ['starting', 'running', 'paused', 'stopping', 'completed', 'stopped']
+
+const resumeOrStartSimulation = async () => {
+  try {
+    const res = await getRunStatus(props.simulationId)
+    if (res.success && res.data && RESUMABLE_STATUSES.includes(res.data.runner_status)) {
+      phase.value = 1
+      runStatus.value = res.data
+      await fetchRunStatus()
+      await fetchRunStatusDetail()
+      if (phase.value !== 2) {
+        startStatusPolling()
+        startDetailPolling()
+      }
+      return
+    }
+  } catch (err) {
+    console.warn('获取运行状态失败:', err)
+  }
+  doStartSimulation()
+}
+
 onMounted(() => {
   addLog(t('log.step3Init'))
   if (props.simulationId) {
-    doStartSimulation()
+    resumeOrStartSimulation()
   }
 })
 
